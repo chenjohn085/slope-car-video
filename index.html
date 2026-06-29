@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>坡道小車 🚗</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; display: flex; flex-direction: column; align-items: center;
+           justify-content: center; height: 100vh; font-family: sans-serif; }
+    canvas { border-radius: 12px; box-shadow: 0 0 40px rgba(100,180,255,0.3); }
+    #controls { margin-top: 12px; display: flex; gap: 12px; }
+    button { padding: 8px 20px; border: none; border-radius: 20px; background: #e05c5c;
+             color: white; font-size: 16px; cursor: pointer; font-weight: bold; }
+    button:hover { background: #c04040; }
+    #info { color: #aaa; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+<div id="controls">
+  <button onclick="resetAll()">🔄 重新開始</button>
+  <button onclick="togglePause()">⏸ 暫停 / 繼續</button>
+  <button onclick="changeSpeed(-1)">🐢 慢速</button>
+  <button onclick="changeSpeed(1)">🐇 快速</button>
+</div>
+<div id="info">每個坡度維持約 3 秒，讓孩子用手比出斜度 ｜ 空白鍵 / 點畫面 跳躍 ｜ OBS 錄製畫面輸出影片</div>
+
+<script>
+// ══════════════════════════════════════════════════════════
+//  常數
+// ══════════════════════════════════════════════════════════
+const W = 1280, H = 720;
+const CAR_SCREEN_X = W * 0.30;
+const SEG = 4;                // 地形採樣間距 px
+const TERRAIN_AHEAD = 2000;   // 預先生成多少 px 在車前面
+const SLOPE_SEC = 3.0;        // 每個坡度維持秒數
+const TRANS_SEC = 0.45;       // 坡度切換過渡秒數
+const FPS = 60;
+
+// 5 個學習段落（隨時間進行，角度範圍逐漸增大）
+const STAGES = [
+  { name: '暖身平路', minAng:  8, maxAng: 20 },
+  { name: '溫柔小坡', minAng: 15, maxAng: 32 },
+  { name: '中等坡度', minAng: 22, maxAng: 45 },
+  { name: '陡坡挑戰', minAng: 30, maxAng: 55 },
+  { name: '超級坡道', minAng: 18, maxAng: 60 },
+];
+const TOTAL_SLOPES = 100; // 100 個坡 × 3秒 = 5 分鐘
+
+// 跳躍物理
+const GRAVITY  = 0.48;
+const JUMP_VEL = -15;
+// 自動跳距離依速度動態計算：讓車子在障礙物正上方時剛好到達跳躍頂點
+function getAutoDist() { return SPEEDS[speedLevel - 1] * 31; }
+
+// 速度
+let speedLevel = 2;
+const SPEEDS = [1.2, 2.5, 4.0, 6.0]; // px/frame
+
+// ── 音樂（Web Audio API 生成的可愛 chiptune）──
+const BPM = 128;
+const BEAT = 60 / BPM;
+// 旋律：[頻率 Hz, 拍數]，0 = 休止符
+const MELODY = [
+  [523.25,0.5],[659.25,0.5],[783.99,0.5],[1046.5,0.5],
+  [783.99,0.5],[659.25,0.5],[523.25,0.5],[0,0.5],
+  [587.33,0.5],[698.46,0.5],[880.00,0.5],[698.46,0.5],
+  [587.33,0.5],[523.25,0.5],[0,1.0],
+  [659.25,0.5],[783.99,0.5],[987.77,0.5],[783.99,0.5],
+  [659.25,0.5],[587.33,0.5],[523.25,0.5],[0,0.5],
+  [392.00,0.5],[523.25,0.5],[659.25,0.5],[783.99,0.5],
+  [1046.5,0.5],[783.99,0.5],[659.25,0.5],[523.25,0.5],
+];
+const BASS = [
+  [130.81,2],[130.81,2],[146.83,2],[146.83,2],
+  [164.81,2],[164.81,2],[130.81,2],[130.81,2],
+];
+let audioCtx = null, melodyIdx = 0, bassIdx = 0;
+let nextMelodyTime = 0, nextBassTime = 0;
+let musicStarted = false;
+
+// ══════════════════════════════════════════════════════════
+//  全域狀態
+// ══════════════════════════════════════════════════════════
+let paused = false;
+let elapsed = 0;          // 已播放秒數（不含暫停）
+let camX   = 0;           // 攝影機世界 X
+
+// 坡度排程
+let slopeSchedule = [];   // [{ang, dir}]  預先生成全部 100 個坡
+let slopeIdx = -1;        // 目前第幾個坡
+let slopeFlash = 0;       // 新坡度出現動畫倒數幀
+
+// 地形 rolling buffer
+let terrainBuf  = [];     // y 值陣列
+let terrainEndX = 0;      // buffer 目前延伸到哪個世界 X
+
+// 障礙物
+let obstacles = [];
+
+// 車子
+let carVelY = 0, carOffsetY = 0, isGrounded = true, justLanded = 0;
+let wheelAngle = 0, animT = 0;
+
+// 背景物件
+let clouds = [], flowers = [];
+
+// ── 開場倒數 ──
+// gameState: 'countdown' → 'go' → 'playing'
+let gameState = 'countdown';
+let countdownVal = 3;
+let countdownFrames = 0;
+const COUNT_FRAMES = 60;   // 每個數字 1 秒
+let goTimer = 0;
+const GO_FRAMES = 50;      // Go! 顯示 ~0.8 秒
+
+// ══════════════════════════════════════════════════════════
+//  坡度排程生成
+// ══════════════════════════════════════════════════════════
+function buildSlopeSchedule() {
+  slopeSchedule = [];
+  let lastAng = 8, lastDir = 1;
+  for (let i = 0; i < TOTAL_SLOPES; i++) {
+    let stageI = constrain(floor(i / TOTAL_SLOPES * STAGES.length), 0, STAGES.length - 1);
+    let s = STAGES[stageI];
+    // 85% 機率強制換方向，確保上下坡交替明顯；相鄰差異 >= 22°
+    let ang, tries = 0;
+    do {
+      let dir = (random() < 0.85) ? -lastDir : lastDir;
+      ang = dir * random(s.minAng, s.maxAng);
+      tries++;
+    } while (abs(ang - lastAng) < 22 && tries < 30);
+    slopeSchedule.push(ang);
+    lastAng = ang;
+    lastDir = ang >= 0 ? 1 : -1;
+  }
+}
+
+// 根據 elapsed 秒取得「目標角度」（含過渡插值）
+function getTargetAngle(sec) {
+  let rawIdx  = sec / SLOPE_SEC;
+  let baseIdx = floor(rawIdx);
+  let frac    = rawIdx - baseIdx; // 0~1，在本段走了多少
+
+  let ang0 = slopeSchedule[constrain(baseIdx - 1, 0, TOTAL_SLOPES - 1)];
+  let ang1 = slopeSchedule[constrain(baseIdx,     0, TOTAL_SLOPES - 1)];
+  let ang2 = slopeSchedule[constrain(baseIdx + 1, 0, TOTAL_SLOPES - 1)];
+
+  // 只在開頭 TRANS_SEC / SLOPE_SEC 比例內做過渡
+  let transFrac = TRANS_SEC / SLOPE_SEC;
+  if (frac < transFrac) {
+    return lerp(ang0, ang1, smoothstep(frac / transFrac));
+  }
+  return ang1;
+}
+
+// 目前坡度段的「穩定角度」（給 UI 顯示用，不含過渡插值）
+function getDisplayAngle(sec) {
+  let idx = constrain(floor(sec / SLOPE_SEC), 0, TOTAL_SLOPES - 1);
+  return slopeSchedule[idx];
+}
+
+// 目前段落 0~1 進度
+function getSlopeProgress(sec) {
+  return (sec % SLOPE_SEC) / SLOPE_SEC;
+}
+
+// ══════════════════════════════════════════════════════════
+//  地形 Rolling Buffer
+// ══════════════════════════════════════════════════════════
+function extendTerrain() {
+  let carWorldX = camX + CAR_SCREEN_X;
+  let target    = carWorldX + TERRAIN_AHEAD;
+  while (terrainEndX < target) {
+    // 把世界 X 換算成對應的「播放秒數」
+    // 地形 X 和 elapsed 的關係：terrain 是從 camX=0 時就開始生成的
+    // camX 增加量 ≈ speed × frame，而 elapsed 也在增加
+    // 簡單對應：terrainEndX 走了多少 px / (speed*60) = 花了多少秒
+    // 但 speed 可能改變，所以改用預先計算的 terrainTimeAtX[]
+    // 最簡做法：以 terrainEndX / (carPxPerSec) 估算對應秒數
+    let spd    = SPEEDS[speedLevel - 1] * FPS; // px/s
+    let secHere = terrainEndX / spd;
+    let ang    = getTargetAngle(secHere);
+    let lastY  = terrainBuf.length > 0 ? terrainBuf[terrainBuf.length - 1] : 420;
+    let newY   = constrain(lastY + tan(radians(ang)) * SEG, 90, H - 60);
+    terrainBuf.push(newY);
+    terrainEndX += SEG;
+  }
+}
+
+function terrainY(wx) {
+  let idx = floor(wx / SEG);
+  idx = constrain(idx, 0, terrainBuf.length - 2);
+  let frac = (wx / SEG) - idx;
+  return lerp(terrainBuf[idx], terrainBuf[idx + 1], frac);
+}
+
+function terrainAngle(wx) {
+  return atan2(terrainY(wx + 8) - terrainY(wx - 8), 16);
+}
+
+// ══════════════════════════════════════════════════════════
+//  障礙物
+// ══════════════════════════════════════════════════════════
+function spawnObstacleIfNeeded() {
+  let carWorldX = camX + CAR_SCREEN_X;
+  let lastOb    = obstacles.length > 0 ? obstacles[obstacles.length - 1] : null;
+  let lastX     = lastOb ? lastOb.x : 800;
+  // 障礙物間距 800~1800px，且坡度不超過 10°
+  if (carWorldX + 1200 > lastX + 600) {
+    let ox = lastX + random(800, 1800);
+    let localAng = abs(degrees(terrainAngle(ox)));
+    if (localAng < 10) {
+      obstacles.push({ x: ox, type: floor(random(3)), w: random(34,52), h: random(38,58), cleared: false });
+    }
+  }
+  // 清掉遠在後方的障礙物
+  while (obstacles.length > 0 && obstacles[0].x < camX - 200) obstacles.shift();
+}
+
+// ══════════════════════════════════════════════════════════
+//  背景物件
+// ══════════════════════════════════════════════════════════
+function makeCloud() {
+  return { x: random(W * 2), y: random(40, 200), w: random(90,200), h: random(40,90), speed: random(0.15,0.4) };
+}
+function makeFlower(wx) {
+  return { x: wx ?? random(terrainEndX), type: floor(random(3)), size: random(9,18) };
+}
+
+// ══════════════════════════════════════════════════════════
+//  Setup
+// ══════════════════════════════════════════════════════════
+function setup() {
+  let cnv = createCanvas(W, H);
+  cnv.parent(document.body);
+  // 滑鼠事件由全域 mousePressed() 統一處理
+
+  buildSlopeSchedule();
+  extendTerrain(); // 預生成前段地形
+
+  for (let i = 0; i < 35; i++) clouds.push(makeCloud());
+  for (let i = 0; i < 200; i++) flowers.push(makeFlower());
+  frameRate(FPS);
+}
+
+function smoothstep(v) { v = constrain(v,0,1); return v*v*(3-2*v); }
+
+// ══════════════════════════════════════════════════════════
+//  Draw loop
+// ══════════════════════════════════════════════════════════
+function draw() {
+  let spd = SPEEDS[speedLevel - 1];
+
+  // ── 倒數開場 ──
+  if (gameState === 'countdown' || gameState === 'go') {
+    animT += 1 / FPS;
+    extendTerrain();
+    let carWY = terrainY(CAR_SCREEN_X);
+    drawSky();
+    drawBackHills(0);
+    drawMidHills(0);
+    drawTerrain();
+    drawCar(CAR_SCREEN_X, carWY, 0);
+    drawProgressBar();
+    drawCountdownOverlay();
+    // 推進倒數
+    if (gameState === 'countdown') {
+      countdownFrames++;
+      if (countdownFrames >= COUNT_FRAMES) {
+        countdownFrames = 0;
+        countdownVal--;
+        if (countdownVal <= 0) { gameState = 'go'; goTimer = GO_FRAMES; }
+      }
+    } else {
+      goTimer--;
+      if (goTimer <= 0) { gameState = 'playing'; startMusic(); }
+    }
+    return;
+  }
+
+  if (!paused) {
+    camX    += spd;
+    elapsed += 1 / FPS;
+    animT   += 1 / FPS;
+    wheelAngle += spd * 0.055;
+
+    // 坡度切換偵測
+    let newIdx = constrain(floor(elapsed / SLOPE_SEC), 0, TOTAL_SLOPES - 1);
+    if (newIdx !== slopeIdx) { slopeIdx = newIdx; slopeFlash = 50; }
+    if (slopeFlash > 0) slopeFlash--;
+
+    // 跳躍物理
+    if (!isGrounded) {
+      carVelY    += GRAVITY;
+      carOffsetY += carVelY;
+      if (carOffsetY >= 0) { carOffsetY=0; carVelY=0; isGrounded=true; justLanded=14; }
+    }
+    if (justLanded > 0) justLanded--;
+
+    // 延伸地形、花朵
+    extendTerrain();
+    spawnObstacleIfNeeded();
+    if (flowers.length < 250) flowers.push(makeFlower(camX + W + random(100,400)));
+
+    // 自動跳障礙物（距離依當前速度動態計算，確保頂點剛好在障礙物上方）
+    let carWX = camX + CAR_SCREEN_X;
+    let autoDist = getAutoDist();
+    for (let ob of obstacles) {
+      if (ob.cleared) continue;
+      let d = ob.x - carWX;
+      if (d > 0 && d < autoDist && isGrounded) doJump();
+      if (d < -80) ob.cleared = true;
+    }
+  }
+
+  // 車子世界位置
+  let carWX    = camX + CAR_SCREEN_X;
+  let carGndY  = terrainY(carWX);
+  let carY     = carGndY + carOffsetY;
+  let carAng   = terrainAngle(carWX);
+  if (!isGrounded) carAng = lerp(carAng, -0.16, smoothstep(min(-carOffsetY / 80, 1)));
+
+  // ── 繪製 ──
+  drawSky();
+  drawBackHills(camX * 0.35);
+  drawMidHills(camX * 0.6);
+  drawTerrain();
+  drawObstacles();
+  drawCar(CAR_SCREEN_X, carY, carAng);
+  drawProgressBar();
+}
+
+// ══════════════════════════════════════════════════════════
+//  繪製：天空
+// ══════════════════════════════════════════════════════════
+function drawSky() {
+  background(248, 230, 215); // 純色奶油粉，無漸層
+}
+
+function drawBackHills(off) {
+  noStroke(); fill(175,210,150); beginShape(); vertex(0,H);
+  for (let x=0;x<=W;x+=15) vertex(x,320+sin((x+off)*0.004)*90+sin((x+off)*0.011)*45);
+  vertex(W,H); endShape(CLOSE);
+}
+
+function drawMidHills(off) {
+  noStroke(); fill(130,190,105); beginShape(); vertex(0,H);
+  for (let x=0;x<=W;x+=10) vertex(x,370+sin((x+off)*0.006)*70+sin((x+off)*0.015)*35);
+  vertex(W,H); endShape(CLOSE);
+}
+
+function drawClouds() {
+  noStroke(); fill(250, 242, 232);
+  for (let c of clouds) {
+    let sx = (c.x - camX * c.speed + W * 10) % (W * 2.5);
+    if (sx < -250 || sx > W+250) continue;
+    ellipse(sx,          c.y,      c.w,        c.h);
+    ellipse(sx-c.w*0.28, c.y+6,   c.w*0.65,   c.h*0.75);
+    ellipse(sx+c.w*0.28, c.y+6,   c.w*0.65,   c.h*0.75);
+    ellipse(sx-c.w*0.1,  c.y-c.h*0.25, c.w*0.5, c.h*0.6);
+  }
+}
+
+function drawTerrain() {
+  let i0 = max(0, floor(camX/SEG)-2);
+  let i1 = min(terrainBuf.length-1, ceil((camX+W)/SEG)+2);
+
+  // 暖褐土壤（草皮下方）
+  noStroke(); fill(185,155,85);
+  beginShape(); vertex(i0*SEG-camX,H);
+  for (let i=i0;i<=i1;i++) vertex(i*SEG-camX, terrainBuf[i]);
+  vertex(i1*SEG-camX,H); endShape(CLOSE);
+
+  // 草綠色帶（純色，固定厚度 14px）
+  noStroke(); fill(158,206,115);
+  beginShape();
+  for (let i=i0;i<=i1;i++) vertex(i*SEG-camX, terrainBuf[i]);
+  for (let i=i1;i>=i0;i--) vertex(i*SEG-camX, terrainBuf[i]+14);
+  endShape(CLOSE);
+}
+
+function drawFlowers() {
+  noStroke();
+  for (let f of flowers) {
+    let sx = f.x - camX;
+    if (sx < -60 || sx > W+60) continue;
+    let sy = terrainY(f.x);
+    if (f.type==0) {
+      fill(120,180,90); rect(sx-2,sy-f.size*0.8,4,f.size*0.8);
+      fill(255,225,120);
+      for (let a=0;a<TWO_PI;a+=PI/4)
+        ellipse(sx+cos(a)*f.size*0.45, sy-f.size+sin(a)*f.size*0.45, f.size*0.4, f.size*0.4);
+      fill(175,125,65); ellipse(sx,sy-f.size,f.size*0.45,f.size*0.45);
+    } else if (f.type==1) {
+      fill(120,180,90); rect(sx-2,sy-f.size*0.7,4,f.size*0.7);
+      fill(235,150,155); ellipse(sx,sy-f.size*0.7,f.size*0.9,f.size*0.9);
+      fill(252,238,210); ellipse(sx,sy-f.size*0.7,f.size*0.35,f.size*0.35);
+    } else {
+      fill(105,170,78);
+      triangle(sx-f.size*0.4,sy,sx,sy-f.size,sx+f.size*0.4,sy);
+      triangle(sx-f.size*0.25,sy,sx+f.size*0.15,sy-f.size*0.8,sx+f.size*0.5,sy);
+    }
+  }
+}
+
+function drawObstacles() {
+  let carWX = camX + CAR_SCREEN_X;
+  for (let ob of obstacles) {
+    if (ob.cleared) continue;
+    let sx = ob.x - camX;
+    if (sx < -100 || sx > W+100) continue;
+    let sy  = terrainY(ob.x);
+    let ang = terrainAngle(ob.x);
+    let d   = ob.x - carWX;
+    if (d > 0 && d < getAutoDist() + 80) {
+      let pulse = sin(animT * 20) > 0;
+      if (pulse) { noFill(); stroke(225,100,100); strokeWeight(3); ellipse(sx,sy-ob.h*0.5,ob.w+20,ob.h+20); }
+    }
+    push(); translate(sx, sy); rotate(ang);
+    if (ob.type==0) drawRock(ob.w,ob.h);
+    else if (ob.type==1) drawBarrel(ob.w,ob.h);
+    else drawCrate(ob.w,ob.h);
+    pop();
+  }
+}
+
+function drawRock(w,h) {
+  // 純色扁平多邊形石頭（兩色塊，無漸層）
+  noStroke(); fill(168,152,132);
+  beginShape();
+  vertex(0,0); vertex(-w*0.5,-h*0.3); vertex(-w*0.38,-h);
+  vertex(w*0.1,-h*1.05); vertex(w*0.48,-h*0.82); vertex(w*0.5,-h*0.2);
+  endShape(CLOSE);
+  fill(195,182,162); // 純色亮面，不混色
+  beginShape();
+  vertex(-w*0.12,-h*0.42); vertex(-w*0.25,-h*0.86); vertex(w*0.06,-h);
+  vertex(w*0.28,-h*0.76);
+  endShape(CLOSE);
+}
+
+function drawBarrel(w,h) {
+  noStroke(); fill(185,140,78); rectMode(CENTER); rect(0,-h/2,w,h,6);
+  stroke(140,100,50); strokeWeight(3); line(-w/2,-h*0.25,w/2,-h*0.25); line(-w/2,-h*0.75,w/2,-h*0.75);
+  noStroke(); fill(155,115,60); rect(0,-h/2,w*0.92,h*0.12); rectMode(CORNER);
+}
+
+function drawCrate(w,h) {
+  noStroke(); fill(210,178,112); rectMode(CENTER); rect(0,-h/2,w,h,3);
+  stroke(172,138,72); strokeWeight(2.5); line(-w/2,-h/2,w/2,-h/2); line(0,0,0,-h);
+  line(-w/2,0,w/2,0); line(-w/2,-h,w/2,-h); noStroke(); rectMode(CORNER);
+}
+
+function drawCar(sx, sy, angle) {
+  push(); translate(sx, sy); rotate(angle);
+  noStroke();
+  // 車身（中粉，圓潤）
+  fill(225,145,145); rectMode(CENTER); rect(2,-22,95,32,12);
+  // 車頂（淺粉，圓潤）
+  fill(245,175,165); rect(6,-40,58,24,10);
+  // 車窗（薄荷綠）
+  fill(168,215,195); rect(14,-41,22,17); rect(-8,-41,22,17);
+  // 車門線
+  stroke(195,110,110); strokeWeight(1.5); line(2,-8,2,-35);
+  // 前燈
+  noStroke(); fill(255,242,185); ellipse(48,-24,14,9);
+  // 後燈
+  fill(235,138,138); ellipse(-48,-23,10,7);
+  // 排氣管
+  fill(185,172,158); rectMode(CENTER); rect(-52,-15,10,5,2);
+  noStroke();
+  for (let i=0;i<3;i++) {
+    fill(215,205,192,map(i,0,2,100,20));
+    ellipse(-62-i*10+sin(animT*7+i)*4,-15-i*4+cos(animT*5+i)*3,map(i,0,2,10,18),map(i,0,2,10,18));
+  }
+  rectMode(CORNER);
+  // 車輪（純色圓形，兩層）
+  let spinX = isGrounded ? 0 : animT * 4;
+  for (let wx of [-28,28]) {
+    fill(72,58,48); ellipse(wx,-6,28,28);
+    // 輪幅（奶油色線條）
+    stroke(210,198,182); strokeWeight(2.5);
+    for (let a=0;a<TWO_PI;a+=PI/3) {
+      let r=8;
+      line(wx+cos(a+wheelAngle+spinX)*r,-6+sin(a+wheelAngle+spinX)*r,
+           wx-cos(a+wheelAngle+spinX)*r,-6-sin(a+wheelAngle+spinX)*r);
+    }
+    noStroke(); fill(225,145,145); ellipse(wx,-6,9,9);
+  }
+  pop();
+}
+
+// ══════════════════════════════════════════════════════════
+//  儀表板：三級坡度顯示（右上角）
+//  平緩 <25°  好斜 25-50°  超斜 >50°
+// ══════════════════════════════════════════════════════════
+function drawAnglePanel(dispAng, progInSlope) {
+  let absAng = abs(dispAng);
+
+  // ── 判斷等級 ──
+  let level, label;
+  let lr, lg, lb;          // 主色
+  if (absAng <= 25) {
+    level = 0; label = '平緩';
+    lr = 80;  lg = 220; lb = 100; // 綠
+  } else if (absAng <= 50) {
+    level = 1; label = '好斜';
+    lr = 255; lg = 200; lb = 40;  // 金黃
+  } else {
+    level = 2; label = '超斜';
+    lr = 255; lg = 55;  lb = 75;  // 熱紅
+  }
+
+  // ── 面板尺寸 ──
+  let pw = 210, ph = 190;
+  let px = W - pw - 16, py = 16;
+  let cx = px + pw / 2;
+
+  // 背景
+  noStroke();
+  fill(10, 10, 20, 200);
+  rect(px, py, pw, ph, 18);
+
+  // 彩色外框（有呼吸感的亮度）
+  let pulse = 0.8 + 0.2 * sin(animT * 4);
+  stroke(lr * pulse, lg * pulse, lb * pulse, 230);
+  strokeWeight(2.5);
+  noFill();
+  rect(px, py, pw, ph, 18);
+  noStroke();
+
+  // ── 三格指示燈 ──
+  const DOT_LABELS = ['平緩', '好斜', '超斜'];
+  const DOT_R = [80,  255, 255];
+  const DOT_G = [220, 200,  55];
+  const DOT_B = [100,  40,  75];
+  let dotY = py + 32;
+  let dotSpacing = pw / 4;
+
+  for (let i = 0; i < 3; i++) {
+    let dx = px + dotSpacing * (i + 1);
+    if (i === level) {
+      // 亮燈
+      fill(DOT_R[i], DOT_G[i], DOT_B[i], 255);
+      ellipse(dx, dotY, 22, 22);
+      // 光暈
+      fill(DOT_R[i], DOT_G[i], DOT_B[i], 60);
+      ellipse(dx, dotY, 40, 40);
+    } else {
+      // 暗燈
+      fill(DOT_R[i], DOT_G[i], DOT_B[i], 55);
+      ellipse(dx, dotY, 18, 18);
+    }
+    // 小標籤
+    fill(i === level ? 255 : 120);
+    textSize(11); textAlign(CENTER, TOP); textStyle(NORMAL);
+    text(DOT_LABELS[i], dx, dotY + 14);
+  }
+
+  // ── 主標籤大字 ──
+  textAlign(CENTER, CENTER);
+  textStyle(BOLD);
+
+  // 文字陰影
+  fill(0, 0, 0, 120);
+  textSize(74);
+  text(label, cx + 2, py + 118 + 2);
+
+  // 主文字
+  fill(lr, lg, lb);
+  text(label, cx, py + 118);
+
+  // ── 倒數進度條 ──
+  let barX = px + 14, barY = py + ph - 30, barW = pw - 28, barH = 12;
+  noStroke(); fill(250, 238, 222, 40); rect(barX, barY, barW, barH, 6);
+  fill(lr, lg, lb, 200);
+  rect(barX, barY, barW * (1 - progInSlope), barH, 6);
+
+  textStyle(NORMAL); textAlign(LEFT, BASELINE);
+}
+
+// ══════════════════════════════════════════════════════════
+//  新坡度出現時的閃光動畫
+// ══════════════════════════════════════════════════════════
+function drawSlopeFlash() {
+  if (slopeFlash <= 0) return;
+  let prog = 1 - slopeFlash / 50; // 0→1 淡出
+  let alpha = lerp(220, 0, prog);
+  let scale = lerp(0.6, 1.3, prog);
+
+  // 畫面中央閃光文字
+  push();
+  translate(CAR_SCREEN_X - 30, H * 0.38);
+  noStroke(); fill(255, 230, 80, alpha);
+  textAlign(CENTER, CENTER); textStyle(BOLD); textSize(48 * scale);
+  text('新坡度！', 0, 0);
+  // 星星粒子
+  fill(255, 220, 50, alpha * 0.8);
+  for (let i=0;i<6;i++) {
+    let a = TWO_PI * i / 6 + prog * PI;
+    let r = 70 * prog;
+    ellipse(cos(a)*r, sin(a)*r, 10, 10);
+  }
+  textStyle(NORMAL); pop();
+}
+
+// ══════════════════════════════════════════════════════════
+//  進度條（底部，可拖曳）
+// ══════════════════════════════════════════════════════════
+const BAR_H   = 22;
+const BAR_PAD = 14;
+const BAR_Y   = H - BAR_H - 8;
+const BAR_W   = W - BAR_PAD * 2;
+let isDraggingBar = false;
+
+function drawProgressBar() {
+  let prog = constrain(elapsed / (TOTAL_SLOPES * SLOPE_SEC), 0, 1);
+
+  // 背景軌道（暖深褐）
+  noStroke(); fill(92, 74, 58, 160);
+  rect(BAR_PAD, BAR_Y, BAR_W, BAR_H, 11);
+
+  // 已播放部分（中粉）
+  let filledW = BAR_W * prog;
+  fill(225, 145, 145, 220);
+  if (filledW > 0) rect(BAR_PAD, BAR_Y, filledW, BAR_H, 11);
+
+  // 拖曳把手（奶油色）
+  let hx = BAR_PAD + filledW;
+  fill(250, 238, 222);
+  ellipse(hx, BAR_Y + BAR_H / 2, 20, 20);
+  stroke(245, 175, 165); strokeWeight(2); noFill();
+  ellipse(hx, BAR_Y + BAR_H / 2, 26, 26);
+  noStroke();
+
+  // 時間標籤
+  let totalSec  = TOTAL_SLOPES * SLOPE_SEC;
+  let curSec    = elapsed;
+  fill(92, 74, 58, 210);
+  textSize(12); textAlign(RIGHT, CENTER);
+  text(fmtTime(curSec) + ' / ' + fmtTime(totalSec), W - BAR_PAD - 18, BAR_Y + BAR_H / 2);
+
+  // 速度標籤（左側）
+  textAlign(LEFT, CENTER);
+  fill(92, 74, 58, 200);
+  text('x' + SPEEDS[speedLevel-1], BAR_PAD + 8, BAR_Y + BAR_H / 2);
+  textAlign(LEFT, BASELINE);
+}
+
+function fmtTime(sec) {
+  let m = floor(sec / 60), s = floor(sec % 60);
+  return nf(m,1,0) + ':' + nf(s,2,0);
+}
+
+function barHitTest(mx, my) {
+  return mx >= BAR_PAD - 10 && mx <= W - BAR_PAD + 10 &&
+         my >= BAR_Y - 8    && my <= BAR_Y + BAR_H + 8;
+}
+
+function seekByMouse(mx) {
+  let prog    = constrain((mx - BAR_PAD) / BAR_W, 0, 1);
+  let newElapsed = prog * TOTAL_SLOPES * SLOPE_SEC;
+  // 重算攝影機位置（依目前速度估算）
+  let newCamX = newElapsed * SPEEDS[speedLevel - 1] * FPS;
+  elapsed = newElapsed;
+  camX    = newCamX;
+  // 補生成地形（若新位置超出現有 buffer）
+  extendTerrain();
+  // 重設車子狀態
+  carOffsetY = 0; carVelY = 0; isGrounded = true;
+  obstacles  = [];
+}
+
+// ══════════════════════════════════════════════════════════
+//  倒數覆蓋層
+// ══════════════════════════════════════════════════════════
+function drawCountdownOverlay() {
+  // 半透明遮罩
+  noStroke(); fill(248, 230, 215, 160); rect(0, 0, W, H);
+
+  textAlign(CENTER, CENTER); textStyle(BOLD);
+
+  if (gameState === 'countdown') {
+    // 數字放大彈跳
+    let bounce = smoothstep(min(countdownFrames / 12, 1));
+    let shrink = countdownFrames > COUNT_FRAMES - 15 ?
+                 smoothstep((countdownFrames - (COUNT_FRAMES-15)) / 15) : 0;
+    let sz = lerp(200, 160, shrink) * lerp(0.4, 1, bounce);
+    textSize(sz);
+    fill(225, 145, 145);
+    text(countdownVal, W / 2, H / 2);
+  } else {
+    // Go! 縮放淡出
+    let prog = 1 - goTimer / GO_FRAMES;
+    let sz = lerp(120, 220, smoothstep(1 - prog));
+    let alpha = lerp(255, 0, smoothstep(prog * 1.3));
+    textSize(sz);
+    fill(245, 175, 165, alpha);
+    text('Go!', W / 2, H / 2);
+  }
+
+  // 提示文字（等待音效授權）
+  if (gameState === 'countdown' && !audioCtx) {
+    textSize(16); textStyle(NORMAL);
+    fill(185, 145, 130, 200);
+    text('點一下畫面開啟音效', W / 2, H / 2 + 130);
+  }
+  textStyle(NORMAL); textAlign(LEFT, BASELINE);
+}
+
+// ══════════════════════════════════════════════════════════
+//  音樂（Web Audio API chiptune）
+// ══════════════════════════════════════════════════════════
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function startMusic() {
+  if (!audioCtx || musicStarted) return;
+  musicStarted = true;
+  nextMelodyTime = audioCtx.currentTime + 0.05;
+  nextBassTime   = audioCtx.currentTime + 0.05;
+  schedulerTick();
+}
+
+function playNote(freq, start, dur, type, vol) {
+  if (!freq || freq === 0) return;
+  let osc  = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.type = type; osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0, start);
+  gain.gain.linearRampToValueAtTime(vol, start + 0.01);
+  gain.gain.setValueAtTime(vol, start + dur * 0.75);
+  gain.gain.linearRampToValueAtTime(0, start + dur * 0.95);
+  osc.start(start); osc.stop(start + dur);
+}
+
+function schedulerTick() {
+  if (!audioCtx || !musicStarted) return;
+  let horizon = audioCtx.currentTime + 0.4;
+  // 旋律（方波，清脆 chiptune）
+  while (nextMelodyTime < horizon) {
+    let [f, b] = MELODY[melodyIdx % MELODY.length];
+    playNote(f, nextMelodyTime, b * BEAT * 0.88, 'square', 0.10);
+    nextMelodyTime += b * BEAT;
+    melodyIdx++;
+  }
+  // 低音（三角波，圓潤底色）
+  while (nextBassTime < horizon) {
+    let [f, b] = BASS[bassIdx % BASS.length];
+    playNote(f, nextBassTime, b * BEAT * 0.6, 'triangle', 0.07);
+    nextBassTime += b * BEAT;
+    bassIdx++;
+  }
+  setTimeout(schedulerTick, 150);
+}
+
+// ══════════════════════════════════════════════════════════
+//  控制
+// ══════════════════════════════════════════════════════════
+function doJump() { if (!isGrounded) return; isGrounded=false; carVelY=JUMP_VEL; }
+
+function keyPressed() { initAudio(); if (key===' ') doJump(); }
+
+function mousePressed() {
+  initAudio();
+  if (barHitTest(mouseX, mouseY)) { isDraggingBar = true; seekByMouse(mouseX); }
+  else doJump();
+}
+
+function mouseDragged() {
+  if (isDraggingBar) seekByMouse(mouseX);
+}
+
+function mouseReleased() { isDraggingBar = false; }
+
+function togglePause() { paused = !paused; }
+function changeSpeed(d) { speedLevel = constrain(speedLevel+d,1,4); }
+function resetAll() {
+  camX=0; elapsed=0; slopeIdx=-1; slopeFlash=0;
+  carVelY=0; carOffsetY=0; isGrounded=true; justLanded=0;
+  terrainBuf=[]; terrainEndX=0; obstacles=[];
+  gameState='countdown'; countdownVal=3; countdownFrames=0; goTimer=0;
+  melodyIdx=0; bassIdx=0; musicStarted=false;
+  if (audioCtx) { audioCtx.close(); audioCtx=null; }
+  buildSlopeSchedule(); extendTerrain();
+}
+</script>
+</body>
+</html>
