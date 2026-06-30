@@ -119,8 +119,8 @@ let wheelAngle = 0, animT = 0;
 let clouds = [], flowers = [];
 
 // ── 開場倒數 ──
-// gameState: 'countdown' → 'go' → 'playing'
-let gameState = 'countdown';
+// gameState: 'idle' → 'countdown' → 'go' → 'playing'
+let gameState = 'idle';
 let countdownVal = 3;
 let countdownFrames = 0;
 const COUNT_FRAMES = 60;   // 每個數字 1 秒
@@ -269,6 +269,17 @@ function smoothstep(v) { v = constrain(v,0,1); return v*v*(3-2*v); }
 // ══════════════════════════════════════════════════════════
 function draw() {
   let spd = SPEEDS[speedLevel - 1];
+
+  // ── 待機畫面 ──
+  if (gameState === 'idle') {
+    animT += 1 / FPS;
+    extendTerrain();
+    let carWY = terrainY(CAR_SCREEN_X);
+    drawSky(); drawBackHills(0); drawMidHills(0); drawTerrain();
+    drawCar(CAR_SCREEN_X, carWY, 0);
+    drawStartOverlay();
+    return;
+  }
 
   // ── 倒數開場 ──
   if (gameState === 'countdown' || gameState === 'go') {
@@ -692,6 +703,31 @@ function seekByMouse(mx) {
 }
 
 // ══════════════════════════════════════════════════════════
+//  待機覆蓋層
+// ══════════════════════════════════════════════════════════
+function drawStartOverlay() {
+  noStroke(); fill(248, 230, 215, 185); rect(0, 0, W, H);
+  textAlign(CENTER, CENTER); textStyle(BOLD);
+
+  // 標題
+  fill(225, 145, 145); textSize(78);
+  text('坡道小車', W / 2, H / 2 - 100);
+
+  // 副標題
+  textStyle(NORMAL); fill(140, 100, 90); textSize(20);
+  text('跟著小車，用手比出坡道的斜度！', W / 2, H / 2 - 28);
+  text('100 個坡度 × 3 秒 ≈ 5 分鐘', W / 2, H / 2 + 4);
+
+  // 開始按鈕
+  let bx = W / 2, by = H / 2 + 90, bw = 200, bh = 62;
+  fill(225, 145, 145); rect(bx - bw / 2, by - bh / 2, bw, bh, 31);
+  fill(255); textStyle(BOLD); textSize(30);
+  text('▶  開始', bx, by);
+
+  textStyle(NORMAL); textAlign(LEFT, BASELINE);
+}
+
+// ══════════════════════════════════════════════════════════
 //  倒數覆蓋層
 // ══════════════════════════════════════════════════════════
 function drawCountdownOverlay() {
@@ -848,8 +884,17 @@ function doJump() { if (!isGrounded) return; isGrounded=false; carVelY=JUMP_VEL;
 
 function keyPressed() { initAudio(); if (key===' ') doJump(); }
 
+function startBtnHit(mx, my) {
+  let bx = W / 2, by = H / 2 + 90, bw = 200, bh = 62;
+  return mx > bx - bw / 2 && mx < bx + bw / 2 && my > by - bh / 2 && my < by + bh / 2;
+}
+
 function mousePressed() {
   initAudio();
+  if (gameState === 'idle') {
+    if (startBtnHit(mouseX, mouseY)) gameState = 'countdown';
+    return;
+  }
   if (barHitTest(mouseX, mouseY)) { isDraggingBar = true; seekByMouse(mouseX); }
 }
 
@@ -869,7 +914,7 @@ function resetAll() {
   camX=0; elapsed=0; slopeIdx=-1; slopeFlash=0;
   carVelY=0; carOffsetY=0; isGrounded=true; justLanded=0;
   terrainBuf=[]; terrainEndX=0; obstacles=[];
-  gameState='countdown'; countdownVal=3; countdownFrames=0; goTimer=0;
+  gameState='idle'; countdownVal=3; countdownFrames=0; goTimer=0;
   melodyIdx=0; bassIdx=0; beatIdx=0; musicStarted=false;
   buildSlopeSchedule(); extendTerrain();
 }
