@@ -218,7 +218,7 @@ function terrainAngle(wx) {
 function spawnObstacleIfNeeded() {
   let carWorldX = camX + CAR_SCREEN_X;
   let lastOb    = obstacles.length > 0 ? obstacles[obstacles.length - 1] : null;
-  let lastX     = lastOb ? lastOb.x : 400;
+  let lastX     = lastOb ? lastOb.x : (camX + CAR_SCREEN_X + 200);
   // 障礙物間距 350~700px；試 6 個位置挑最平的
   if (carWorldX + 900 > lastX + 350) {
     let bestOx = -1, bestAng = 999;
@@ -259,6 +259,7 @@ function setup() {
   for (let i = 0; i < 35; i++) clouds.push(makeCloud());
   for (let i = 0; i < 200; i++) flowers.push(makeFlower());
   frameRate(FPS);
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
 }
 
 function smoothstep(v) { v = constrain(v,0,1); return v*v*(3-2*v); }
@@ -284,12 +285,14 @@ function draw() {
     // 推進倒數
     if (gameState === 'countdown') {
       countdownFrames++;
+      if (countdownFrames === 1) playBeep(440, 0.15, 0.3);
       if (countdownFrames >= COUNT_FRAMES) {
         countdownFrames = 0;
         countdownVal--;
         if (countdownVal <= 0) { gameState = 'go'; goTimer = GO_FRAMES; }
       }
     } else {
+      if (goTimer === GO_FRAMES) playBeep(880, 0.45, 0.4);
       goTimer--;
       if (goTimer <= 0) { gameState = 'playing'; startMusic(); }
     }
@@ -729,19 +732,37 @@ function drawCountdownOverlay() {
 //  音樂（Web Audio API chiptune）
 // ══════════════════════════════════════════════════════════
 function initAudio() {
-  if (audioCtx) { audioCtx.resume(); return; }
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return; }
+  }
+  audioCtx.resume();
   if (gameState === 'playing') startMusic();
 }
 
+function playBeep(freq, dur, vol) {
+  if (!audioCtx) return;
+  let o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.type = 'sine'; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.start(); o.stop(audioCtx.currentTime + dur);
+}
+
 function startMusic() {
-  if (!audioCtx || musicStarted) return;
-  musicStarted = true;
-  nextMelodyTime = audioCtx.currentTime + 0.05;
-  nextBassTime   = audioCtx.currentTime + 0.05;
-  nextBeatTime   = audioCtx.currentTime + 0.05;
-  beatIdx = 0;
-  schedulerTick();
+  if (musicStarted) return;
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return; }
+  }
+  audioCtx.resume().then(() => {
+    if (musicStarted) return;
+    musicStarted = true;
+    nextMelodyTime = audioCtx.currentTime + 0.05;
+    nextBassTime   = audioCtx.currentTime + 0.05;
+    nextBeatTime   = audioCtx.currentTime + 0.05;
+    beatIdx = 0;
+    schedulerTick();
+  });
 }
 
 function playNote(freq, start, dur, type, vol) {
@@ -830,7 +851,6 @@ function keyPressed() { initAudio(); if (key===' ') doJump(); }
 function mousePressed() {
   initAudio();
   if (barHitTest(mouseX, mouseY)) { isDraggingBar = true; seekByMouse(mouseX); }
-  else doJump();
 }
 
 function mouseDragged() {
@@ -847,7 +867,6 @@ function resetAll() {
   terrainBuf=[]; terrainEndX=0; obstacles=[];
   gameState='countdown'; countdownVal=3; countdownFrames=0; goTimer=0;
   melodyIdx=0; bassIdx=0; beatIdx=0; musicStarted=false;
-  if (audioCtx) { audioCtx.close(); audioCtx=null; }
   buildSlopeSchedule(); extendTerrain();
 }
 </script>
