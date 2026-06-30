@@ -859,7 +859,11 @@ function mouseDragged() {
 
 function mouseReleased() { isDraggingBar = false; }
 
-function togglePause() { paused = !paused; }
+function togglePause() {
+  paused = !paused;
+  if (!audioCtx) return;
+  if (paused) audioCtx.suspend(); else audioCtx.resume();
+}
 function changeSpeed(d) { speedLevel = constrain(speedLevel+d,1,4); }
 function resetAll() {
   camX=0; elapsed=0; slopeIdx=-1; slopeFlash=0;
