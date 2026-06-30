@@ -729,8 +729,9 @@ function drawCountdownOverlay() {
 //  音樂（Web Audio API chiptune）
 // ══════════════════════════════════════════════════════════
 function initAudio() {
-  if (audioCtx) return;
+  if (audioCtx) { audioCtx.resume(); return; }
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (gameState === 'playing') startMusic();
 }
 
 function startMusic() {
