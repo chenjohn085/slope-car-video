@@ -55,28 +55,41 @@ function getAutoDist() { return SPEEDS[speedLevel - 1] * 31; }
 
 // 速度
 let speedLevel = 2;
-const SPEEDS = [1.2, 2.5, 4.0, 6.0]; // px/frame
+const SPEEDS = [2.0, 3.5, 5.5, 8.0]; // px/frame
 
-// ── 音樂（Web Audio API 生成的可愛 chiptune）──
-const BPM = 128;
+// ── 音樂（Web Audio API 生成的活潑 chiptune）──
+const BPM = 160;
 const BEAT = 60 / BPM;
 // 旋律：[頻率 Hz, 拍數]，0 = 休止符
 const MELODY = [
-  [523.25,0.5],[659.25,0.5],[783.99,0.5],[1046.5,0.5],
-  [783.99,0.5],[659.25,0.5],[523.25,0.5],[0,0.5],
-  [587.33,0.5],[698.46,0.5],[880.00,0.5],[698.46,0.5],
-  [587.33,0.5],[523.25,0.5],[0,1.0],
-  [659.25,0.5],[783.99,0.5],[987.77,0.5],[783.99,0.5],
-  [659.25,0.5],[587.33,0.5],[523.25,0.5],[0,0.5],
-  [392.00,0.5],[523.25,0.5],[659.25,0.5],[783.99,0.5],
-  [1046.5,0.5],[783.99,0.5],[659.25,0.5],[523.25,0.5],
+  // 上行衝刺
+  [523.25,0.25],[659.25,0.25],[783.99,0.25],[1046.5,0.5],
+  [880.00,0.25],[783.99,0.25],[659.25,0.25],[523.25,0.25],[0,0.25],
+  // 跳躍感
+  [587.33,0.25],[587.33,0.25],[698.46,0.25],[880.00,0.25],
+  [783.99,0.25],[698.46,0.25],[587.33,0.5],[0,0.25],
+  // 爬坡旋律
+  [659.25,0.25],[783.99,0.25],[880.00,0.25],[987.77,0.25],
+  [1046.5,0.5],[880.00,0.25],[783.99,0.25],
+  // 下滑返回
+  [659.25,0.25],[523.25,0.25],[659.25,0.25],[783.99,0.25],
+  [523.25,0.75],[0,0.25],
+  // 快速段落
+  [659.25,0.25],[659.25,0.25],[783.99,0.25],[659.25,0.25],
+  [587.33,0.25],[523.25,0.25],[587.33,0.25],[659.25,0.25],
+  [783.99,0.25],[783.99,0.25],[880.00,0.25],[783.99,0.25],
+  [1046.5,0.5],[880.00,0.25],[0,0.25],
 ];
 const BASS = [
-  [130.81,2],[130.81,2],[146.83,2],[146.83,2],
-  [164.81,2],[164.81,2],[130.81,2],[130.81,2],
+  [130.81,0.5],[196.00,0.5],[130.81,0.5],[196.00,0.5],
+  [146.83,0.5],[196.00,0.5],[146.83,0.5],[196.00,0.5],
+  [164.81,0.5],[196.00,0.5],[164.81,0.5],[196.00,0.5],
+  [130.81,0.5],[130.81,0.5],[196.00,0.5],[130.81,0.5],
 ];
-let audioCtx = null, melodyIdx = 0, bassIdx = 0;
-let nextMelodyTime = 0, nextBassTime = 0;
+// 鼓 pattern：1=kick, 2=hihat, 3=snare（8分音符格）
+const DRUM_PATTERN = [1,2,2,2,3,2,2,2,1,2,1,2,3,2,2,2];
+let audioCtx = null, melodyIdx = 0, bassIdx = 0, beatIdx = 0;
+let nextMelodyTime = 0, nextBassTime = 0, nextBeatTime = 0;
 let musicStarted = false;
 
 // ══════════════════════════════════════════════════════════
@@ -205,13 +218,17 @@ function terrainAngle(wx) {
 function spawnObstacleIfNeeded() {
   let carWorldX = camX + CAR_SCREEN_X;
   let lastOb    = obstacles.length > 0 ? obstacles[obstacles.length - 1] : null;
-  let lastX     = lastOb ? lastOb.x : 800;
-  // 障礙物間距 800~1800px，且坡度不超過 10°
-  if (carWorldX + 1200 > lastX + 600) {
-    let ox = lastX + random(800, 1800);
-    let localAng = abs(degrees(terrainAngle(ox)));
-    if (localAng < 10) {
-      obstacles.push({ x: ox, type: floor(random(3)), w: random(34,52), h: random(38,58), cleared: false });
+  let lastX     = lastOb ? lastOb.x : 400;
+  // 障礙物間距 350~700px；試 6 個位置挑最平的
+  if (carWorldX + 900 > lastX + 350) {
+    let bestOx = -1, bestAng = 999;
+    for (let t = 0; t < 6; t++) {
+      let tx = lastX + random(350, 700);
+      let ta = abs(degrees(terrainAngle(tx)));
+      if (ta < bestAng) { bestAng = ta; bestOx = tx; }
+    }
+    if (bestAng < 25) {
+      obstacles.push({ x: bestOx, type: floor(random(3)), w: random(34,52), h: random(38,58), cleared: false });
     }
   }
   // 清掉遠在後方的障礙物
@@ -721,6 +738,8 @@ function startMusic() {
   musicStarted = true;
   nextMelodyTime = audioCtx.currentTime + 0.05;
   nextBassTime   = audioCtx.currentTime + 0.05;
+  nextBeatTime   = audioCtx.currentTime + 0.05;
+  beatIdx = 0;
   schedulerTick();
 }
 
@@ -735,6 +754,40 @@ function playNote(freq, start, dur, type, vol) {
   gain.gain.setValueAtTime(vol, start + dur * 0.75);
   gain.gain.linearRampToValueAtTime(0, start + dur * 0.95);
   osc.start(start); osc.stop(start + dur);
+}
+
+function playKick(t) {
+  let o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.frequency.setValueAtTime(180, t);
+  o.frequency.exponentialRampToValueAtTime(40, t + 0.15);
+  g.gain.setValueAtTime(0.35, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+  o.start(t); o.stop(t + 0.2);
+}
+
+function playSnare(t) {
+  let n = audioCtx.sampleRate * 0.12;
+  let buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  let d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  let src = audioCtx.createBufferSource(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  f.type = 'highpass'; f.frequency.value = 2000;
+  src.buffer = buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(0.15, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  src.start(t); src.stop(t + 0.12);
+}
+
+function playHihat(t) {
+  let n = audioCtx.sampleRate * 0.04;
+  let buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  let d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  let src = audioCtx.createBufferSource(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  f.type = 'highpass'; f.frequency.value = 8000;
+  src.buffer = buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+  src.start(t); src.stop(t + 0.04);
 }
 
 function schedulerTick() {
@@ -753,6 +806,15 @@ function schedulerTick() {
     playNote(f, nextBassTime, b * BEAT * 0.6, 'triangle', 0.07);
     nextBassTime += b * BEAT;
     bassIdx++;
+  }
+  // 鼓（kick / snare / hihat）
+  while (nextBeatTime < horizon) {
+    let p = DRUM_PATTERN[beatIdx % DRUM_PATTERN.length];
+    if (p === 1) playKick(nextBeatTime);
+    else if (p === 3) playSnare(nextBeatTime);
+    else if (p === 2) playHihat(nextBeatTime);
+    nextBeatTime += BEAT * 0.5;
+    beatIdx++;
   }
   setTimeout(schedulerTick, 150);
 }
@@ -783,7 +845,7 @@ function resetAll() {
   carVelY=0; carOffsetY=0; isGrounded=true; justLanded=0;
   terrainBuf=[]; terrainEndX=0; obstacles=[];
   gameState='countdown'; countdownVal=3; countdownFrames=0; goTimer=0;
-  melodyIdx=0; bassIdx=0; musicStarted=false;
+  melodyIdx=0; bassIdx=0; beatIdx=0; musicStarted=false;
   if (audioCtx) { audioCtx.close(); audioCtx=null; }
   buildSlopeSchedule(); extendTerrain();
 }
