@@ -45,7 +45,8 @@ const STAGES = [
   { name: '陡坡挑戰', minAng: 30, maxAng: 55 },
   { name: '超級坡道', minAng: 18, maxAng: 60 },
 ];
-const TOTAL_SLOPES = 100; // 100 個坡 × 3秒 = 5 分鐘
+let selectedMinutes = 5;               // 玩家在待機畫面選擇的遊戲時間（分鐘）
+let TOTAL_SLOPES = Math.round(selectedMinutes * 60 / SLOPE_SEC);
 
 // 跳躍物理
 const GRAVITY  = 0.48;
@@ -119,7 +120,7 @@ let wheelAngle = 0, animT = 0;
 let clouds = [], flowers = [];
 
 // ── 開場倒數 ──
-// gameState: 'idle' → 'countdown' → 'go' → 'playing'
+// gameState: 'idle' → 'countdown' → 'go' → 'playing' → 'finish'
 let gameState = 'idle';
 let countdownVal = 3;
 let countdownFrames = 0;
@@ -127,15 +128,24 @@ const COUNT_FRAMES = 60;   // 每個數字 1 秒
 let goTimer = 0;
 const GO_FRAMES = 50;      // Go! 顯示 ~0.8 秒
 
+// ── 終點慶祝 ──
+let confetti = [];
+let finishBurstTimer = 0;
+
 // ══════════════════════════════════════════════════════════
 //  坡度排程生成
 // ══════════════════════════════════════════════════════════
 function buildSlopeSchedule() {
   slopeSchedule = [];
-  let lastAng = 8, lastDir = 1;
+  // 每次重玩都幫每個階段的角度範圍做一點隨機微調，讓坡道稍稍不同
+  let stageJitter = STAGES.map(s => {
+    let j = random(-4, 4);
+    return { minAng: max(5, s.minAng + j), maxAng: s.maxAng + j };
+  });
+  let lastAng = 8, lastDir = random() < 0.5 ? 1 : -1;
   for (let i = 0; i < TOTAL_SLOPES; i++) {
     let stageI = constrain(floor(i / TOTAL_SLOPES * STAGES.length), 0, STAGES.length - 1);
-    let s = STAGES[stageI];
+    let s = stageJitter[stageI];
     // 85% 機率強制換方向，確保上下坡交替明顯；相鄰差異 >= 22°
     let ang, tries = 0;
     do {
@@ -147,6 +157,14 @@ function buildSlopeSchedule() {
     lastAng = ang;
     lastDir = ang >= 0 ? 1 : -1;
   }
+}
+
+function selectTime(min) {
+  selectedMinutes = min;
+  TOTAL_SLOPES = Math.round(min * 60 / SLOPE_SEC);
+  buildSlopeSchedule();
+  terrainBuf = []; terrainEndX = 0;
+  extendTerrain();
 }
 
 // 根據 elapsed 秒取得「目標角度」（含過渡插值）
@@ -310,7 +328,7 @@ function draw() {
     return;
   }
 
-  if (!paused) {
+  if (!paused && gameState === 'playing') {
     camX    += spd;
     elapsed += 1 / FPS;
     animT   += 1 / FPS;
@@ -343,6 +361,23 @@ function draw() {
       if (d > 0 && d < autoDist && isGrounded) doJump();
       if (d < -80) ob.cleared = true;
     }
+
+    // 抵達終點 → 進入慶祝畫面
+    if (elapsed >= TOTAL_SLOPES * SLOPE_SEC) {
+      gameState = 'finish';
+      musicStarted = false;
+      confetti = [];
+      spawnConfetti(220);
+      finishBurstTimer = 90;
+      playCheer();
+    }
+  } else if (!paused && gameState === 'finish') {
+    animT += 1 / FPS;
+    if (finishBurstTimer > 0) {
+      finishBurstTimer--;
+      if (finishBurstTimer === 0) spawnConfetti(120);
+    }
+    updateConfetti();
   }
 
   // 車子世界位置
@@ -360,6 +395,11 @@ function draw() {
   drawObstacles();
   drawCar(CAR_SCREEN_X, carY, carAng);
   drawProgressBar();
+
+  if (gameState === 'finish') {
+    drawConfetti();
+    drawFinishOverlay();
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -705,21 +745,61 @@ function seekByMouse(mx) {
 // ══════════════════════════════════════════════════════════
 //  待機覆蓋層
 // ══════════════════════════════════════════════════════════
+const TIME_OPTIONS = [1, 2, 3, 4, 5];
+const TIME_BTN_W = 64, TIME_BTN_H = 40, TIME_BTN_GAP = 12;
+const TIME_ROW_Y = 0; // Y 偏移（相對 H/2），實際位置見 timeBtnRect()
+
+function timeBtnRect(i) {
+  let totalW = TIME_OPTIONS.length * TIME_BTN_W + (TIME_OPTIONS.length - 1) * TIME_BTN_GAP;
+  let startX = W / 2 - totalW / 2;
+  let bx = startX + i * (TIME_BTN_W + TIME_BTN_GAP) + TIME_BTN_W / 2;
+  let by = H / 2 + 32;
+  return { bx, by, bw: TIME_BTN_W, bh: TIME_BTN_H };
+}
+
+function timeBtnHit(mx, my) {
+  for (let i = 0; i < TIME_OPTIONS.length; i++) {
+    let { bx, by, bw, bh } = timeBtnRect(i);
+    if (mx > bx - bw/2 && mx < bx + bw/2 && my > by - bh/2 && my < by + bh/2) return i;
+  }
+  return -1;
+}
+
 function drawStartOverlay() {
   noStroke(); fill(248, 230, 215, 185); rect(0, 0, W, H);
   textAlign(CENTER, CENTER); textStyle(BOLD);
 
   // 標題
   fill(225, 145, 145); textSize(78);
-  text('坡道小車', W / 2, H / 2 - 100);
+  text('坡道小車', W / 2, H / 2 - 110);
 
   // 副標題
   textStyle(NORMAL); fill(140, 100, 90); textSize(20);
-  text('跟著小車，用手比出坡道的斜度！', W / 2, H / 2 - 28);
-  text('100 個坡度 × 3 秒 ≈ 5 分鐘', W / 2, H / 2 + 4);
+  text('跟著小車，用手比出坡道的斜度！', W / 2, H / 2 - 46);
+
+  // 時間選擇標籤
+  fill(140, 100, 90); textSize(15);
+  text('選擇遊戲時間', W / 2, H / 2 - 4);
+
+  // 時間選擇按鈕
+  for (let i = 0; i < TIME_OPTIONS.length; i++) {
+    let { bx, by, bw, bh } = timeBtnRect(i);
+    let selected = TIME_OPTIONS[i] === selectedMinutes;
+    fill(selected ? 225 : 250, selected ? 145 : 238, selected ? 145 : 222);
+    stroke(225, 145, 145); strokeWeight(selected ? 0 : 1.5);
+    rect(bx - bw/2, by - bh/2, bw, bh, 14);
+    noStroke();
+    fill(selected ? 255 : 140, selected ? 255 : 100, selected ? 255 : 90);
+    textStyle(BOLD); textSize(18);
+    text(TIME_OPTIONS[i] + ' 分', bx, by);
+  }
+
+  // 動態顯示坡度數量
+  textStyle(NORMAL); fill(140, 100, 90); textSize(14);
+  text(TOTAL_SLOPES + ' 個坡度 × 3 秒 ≈ ' + selectedMinutes + ' 分鐘', W / 2, H / 2 + 62);
 
   // 開始按鈕
-  let bx = W / 2, by = H / 2 + 90, bw = 200, bh = 62;
+  let bx = W / 2, by = H / 2 + 135, bw = 200, bh = 62;
   fill(225, 145, 145); rect(bx - bw / 2, by - bh / 2, bw, bh, 31);
   fill(255); textStyle(BOLD); textSize(30);
   text('▶  開始', bx, by);
@@ -761,6 +841,68 @@ function drawCountdownOverlay() {
     fill(185, 145, 130, 200);
     text('點一下畫面開啟音效', W / 2, H / 2 + 130);
   }
+  textStyle(NORMAL); textAlign(LEFT, BASELINE);
+}
+
+// ══════════════════════════════════════════════════════════
+//  終點慶祝：彩帶 + 覆蓋層
+// ══════════════════════════════════════════════════════════
+const CONFETTI_COLORS = [
+  [225,145,145], [255,200,80], [130,190,105],
+  [120,180,220], [235,150,155], [255,225,120],
+];
+
+function spawnConfetti(n) {
+  for (let i = 0; i < n; i++) {
+    confetti.push({
+      x: random(W), y: random(-H * 0.4, 0),
+      vx: random(-1.5, 1.5), vy: random(1, 3),
+      rot: random(TWO_PI), vrot: random(-0.2, 0.2),
+      w: random(6, 12), h: random(8, 16),
+      color: random(CONFETTI_COLORS),
+    });
+  }
+}
+
+function updateConfetti() {
+  for (let c of confetti) {
+    c.vy += 0.03;
+    c.x += c.vx; c.y += c.vy; c.rot += c.vrot;
+  }
+  confetti = confetti.filter(c => c.y < H + 30);
+}
+
+function drawConfetti() {
+  noStroke();
+  for (let c of confetti) {
+    push(); translate(c.x, c.y); rotate(c.rot);
+    fill(c.color[0], c.color[1], c.color[2]);
+    rectMode(CENTER); rect(0, 0, c.w, c.h, 2);
+    pop();
+  }
+  rectMode(CORNER);
+}
+
+function finishBtnHit(mx, my) {
+  let bx = W / 2, by = H / 2 + 135, bw = 220, bh = 62;
+  return mx > bx - bw / 2 && mx < bx + bw / 2 && my > by - bh / 2 && my < by + bh / 2;
+}
+
+function drawFinishOverlay() {
+  noStroke(); fill(248, 230, 215, 150); rect(0, 0, W, H);
+  textAlign(CENTER, CENTER); textStyle(BOLD);
+
+  fill(225, 145, 145); textSize(64);
+  text('🎉 抵達終點！ 🎉', W / 2, H / 2 - 90);
+
+  textStyle(NORMAL); fill(140, 100, 90); textSize(20);
+  text('挑戰了 ' + TOTAL_SLOPES + ' 個坡度，玩了 ' + selectedMinutes + ' 分鐘！', W / 2, H / 2 - 20);
+
+  let bx = W / 2, by = H / 2 + 135, bw = 220, bh = 62;
+  fill(225, 145, 145); rect(bx - bw / 2, by - bh / 2, bw, bh, 31);
+  fill(255); textStyle(BOLD); textSize(28);
+  text('🔄 再玩一次', bx, by);
+
   textStyle(NORMAL); textAlign(LEFT, BASELINE);
 }
 
@@ -849,6 +991,43 @@ function playHihat(t) {
   src.start(t); src.stop(t + 0.04);
 }
 
+function playClap(t) {
+  let n = audioCtx.sampleRate * 0.05;
+  let buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  let d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  let src = audioCtx.createBufferSource(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  f.type = 'bandpass'; f.frequency.value = random(1500, 3000); f.Q.value = 1.2;
+  src.buffer = buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(random(0.08, 0.18), t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+  src.start(t); src.stop(t + 0.05);
+}
+
+// 終點歡呼聲：小號音階 + 隨機鼓掌 + 人群「嗚～」聲
+function playCheer() {
+  if (!audioCtx) return;
+  audioCtx.resume();
+  let t0 = audioCtx.currentTime;
+
+  const fanfare = [523.25, 659.25, 783.99, 1046.5, 1318.5];
+  fanfare.forEach((f, i) => playNote(f, t0 + i * 0.12, 0.35, 'square', 0.18));
+
+  for (let i = 0; i < 40; i++) playClap(t0 + random(0.1, 1.8));
+
+  let n = audioCtx.sampleRate * 1.8;
+  let buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  let d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  let src = audioCtx.createBufferSource(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  f.type = 'bandpass'; f.frequency.value = 1200; f.Q.value = 0.7;
+  src.buffer = buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.22, t0 + 0.3);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.8);
+  src.start(t0); src.stop(t0 + 1.8);
+}
+
 function schedulerTick() {
   if (!audioCtx || !musicStarted) return;
   let horizon = audioCtx.currentTime + 0.4;
@@ -886,14 +1065,20 @@ function doJump() { if (!isGrounded) return; isGrounded=false; carVelY=JUMP_VEL;
 function keyPressed() { initAudio(); if (key===' ') doJump(); }
 
 function startBtnHit(mx, my) {
-  let bx = W / 2, by = H / 2 + 90, bw = 200, bh = 62;
+  let bx = W / 2, by = H / 2 + 135, bw = 200, bh = 62;
   return mx > bx - bw / 2 && mx < bx + bw / 2 && my > by - bh / 2 && my < by + bh / 2;
 }
 
 function mousePressed() {
   initAudio();
   if (gameState === 'idle') {
+    let ti = timeBtnHit(mouseX, mouseY);
+    if (ti >= 0) { selectTime(TIME_OPTIONS[ti]); return; }
     if (startBtnHit(mouseX, mouseY)) gameState = 'countdown';
+    return;
+  }
+  if (gameState === 'finish') {
+    if (finishBtnHit(mouseX, mouseY)) resetAll();
     return;
   }
   if (barHitTest(mouseX, mouseY)) { isDraggingBar = true; seekByMouse(mouseX); }
@@ -917,6 +1102,7 @@ function resetAll() {
   terrainBuf=[]; terrainEndX=0; obstacles=[];
   gameState='idle'; countdownVal=3; countdownFrames=0; goTimer=0;
   melodyIdx=0; bassIdx=0; beatIdx=0; musicStarted=false;
+  confetti=[]; finishBurstTimer=0;
   buildSlopeSchedule(); extendTerrain();
 }
 </script>
