@@ -58,7 +58,7 @@ let speedLevel = 2;
 const SPEEDS = [2.0, 3.5, 5.5, 8.0]; // px/frame
 
 // ── 音樂（Web Audio API 生成的活潑 chiptune）──
-const BPM = 160;
+const BPM = 132;
 const BEAT = 60 / BPM;
 // 旋律：[頻率 Hz, 拍數]，0 = 休止符
 const MELODY = [
@@ -771,6 +771,7 @@ function initAudio() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return; }
   }
+  if (paused) return;
   audioCtx.resume();
   if (gameState === 'playing') startMusic();
 }
